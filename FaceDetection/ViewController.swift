@@ -7,6 +7,7 @@
 
 import UIKit
 import AVKit
+import Vision
 
 class ViewController: UIViewController {
     var previewView: UIView?
@@ -22,6 +23,14 @@ class ViewController: UIViewController {
     
     // Layer UI for drawing Vision results
     var rootLayer: CALayer?
+    var detectionOverlayLayer: CALayer?
+    var detectedFaceRectangleShapeLayer: CAShapeLayer?
+    
+    // Vision Requests
+    private var detectionRequests: [VNDetectFaceRectanglesRequest]?
+    private var trackingRequests: [VNTrackObjectRequest]?
+    
+    lazy var sequenceRequstHandler = VNSequenceRequestHandler()
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -29,6 +38,8 @@ class ViewController: UIViewController {
         setupPreviewView()
         
         session = setupAVCaptureSession()
+        
+        prepareVisionRequest()
         
         session?.startRunning()
     }
@@ -184,11 +195,293 @@ class ViewController: UIViewController {
     private func presentError(_ error: NSError) {
         presentErrorAlert(withTitle: "Failed with error \(error.code)", message: error.localizedDescription)
     }
+    
+    // MARK: Helper Methods for Handling Device Orientaion and EXIF
+    private func radiansForDegrees(_ degrees: CGFloat) -> CGFloat {
+        return CGFloat(Double(degrees) * Double.pi / 180.0)
+    }
+
+    private func exifOrientationForDeviceOrientation(_ deviceOrientation: UIDeviceOrientation) -> CGImagePropertyOrientation {
+        switch deviceOrientation {
+        case .portraitUpsideDown:
+            return .rightMirrored
+        case .landscapeLeft:
+            return .downMirrored
+        case .landscapeRight:
+            return .upMirrored
+        default:
+            return .leftMirrored
+        }
+    }
+    
+    private func exifOrientationForCurrentDeviceOrientation() -> CGImagePropertyOrientation {
+        return exifOrientationForDeviceOrientation(UIDevice.current.orientation)
+    }
+    
+    
+    // MARK: Performing Vision Requests
+    private func prepareVisionRequest() {
+        var requests = [VNTrackObjectRequest]()
+        
+        let faceDetectionRequest = VNDetectFaceRectanglesRequest { (request, error) in
+            if error != nil {
+                print("FaceDetection error: \(String(describing: error))")
+            }
+            
+            guard let faceDetectionRequest = request as? VNDetectFaceRectanglesRequest,
+                  let results = faceDetectionRequest.results as? [VNFaceObservation] else {
+                return
+            }
+            
+            DispatchQueue.main.async {
+                // Add the observations to tracking list
+                for observation in results {
+                    let faceTrackingRequest = VNTrackObjectRequest(detectedObjectObservation: observation)
+                    requests.append(faceTrackingRequest)
+                }
+                self.trackingRequests = requests
+            }
+        }
+        
+        // Start with detection. Find face, then track it
+        detectionRequests = [faceDetectionRequest]
+        
+        sequenceRequstHandler = VNSequenceRequestHandler()
+        
+        setupVisionDrawingLayers()
+    }
+    
+    private func setupVisionDrawingLayers() {
+        let captureDeviceResolution = self.captureDeviceResolution
+        
+        let captureDeviceBounds = CGRect(x: 0,
+                                         y: 0,
+                                         width: captureDeviceResolution.width,
+                                         height: captureDeviceResolution.height)
+        
+        let captureDeviceBoundsCenterPoint = CGPoint(x: captureDeviceBounds.midX,
+                                                     y: captureDeviceBounds.midY)
+        
+        let normalizedCenterPoint = CGPoint(x: 0.5, y: 0.5)
+        
+        guard let rootLayer = rootLayer else {
+            presentErrorAlert(message: "View was not property initialized")
+            return
+        }
+        
+        let overlayLayer = CALayer()
+        overlayLayer.name = "DetectionOverlay"
+        overlayLayer.masksToBounds = true
+        overlayLayer.anchorPoint = normalizedCenterPoint
+        overlayLayer.bounds = captureDeviceBounds
+        overlayLayer.position = CGPoint(x: rootLayer.bounds.midX, y: rootLayer.bounds.midY)
+        
+        let faceRectangleShapeLayer = CAShapeLayer()
+        faceRectangleShapeLayer.name = "RectangleOutlineLayer"
+        faceRectangleShapeLayer.bounds = captureDeviceBounds
+        faceRectangleShapeLayer.anchorPoint = normalizedCenterPoint
+        faceRectangleShapeLayer.position = captureDeviceBoundsCenterPoint
+        faceRectangleShapeLayer.fillColor = nil
+        faceRectangleShapeLayer.strokeColor = UIColor.green.withAlphaComponent(0.7).cgColor
+        faceRectangleShapeLayer.lineWidth = 5
+        faceRectangleShapeLayer.shadowOpacity = 0.7
+        faceRectangleShapeLayer.shadowRadius = 5
+        
+        overlayLayer.addSublayer(faceRectangleShapeLayer)
+        rootLayer.addSublayer(overlayLayer)
+        
+        detectionOverlayLayer = overlayLayer
+        detectedFaceRectangleShapeLayer = faceRectangleShapeLayer
+    }
+        
+    private func updateLayerGeometry() {
+        guard let overlayLayer = detectionOverlayLayer,
+              let rootLayer = rootLayer,
+              let previewLayer = previewLayer else {
+            return
+        }
+        
+        CATransaction.setValue(NSNumber(value: true), forKey: kCATransactionDisableActions)
+        
+        let videoPreviewRect = previewLayer.layerRectConverted(fromMetadataOutputRect: CGRect(x: 0, y: 0, width: 1, height: 1))
+        
+        let rotation: CGFloat
+        let scaleX: CGFloat
+        let scaleY: CGFloat
+        
+        switch UIDevice.current.orientation {
+        case .portraitUpsideDown:
+            rotation = 180
+            scaleX = videoPreviewRect.width / captureDeviceResolution.width
+            scaleY = videoPreviewRect.height / captureDeviceResolution.height
+        
+        case .landscapeLeft:
+            rotation = 90
+            scaleX = videoPreviewRect.height / captureDeviceResolution.width
+            scaleY = scaleX
+            
+        case .landscapeRight:
+            rotation = -90
+            scaleX = videoPreviewRect.height / captureDeviceResolution.width
+            scaleY = scaleX
+            
+        default:
+            rotation = 0
+            scaleX = videoPreviewRect.width / captureDeviceResolution.width
+            scaleY = videoPreviewRect.height / captureDeviceResolution.height
+        }
+        
+        let affineTransform = CGAffineTransform(rotationAngle: radiansForDegrees(rotation)).scaledBy(x: scaleX, y: -scaleY)
+        overlayLayer.setAffineTransform(affineTransform)
+        
+        let rootLayerBounds = rootLayer.bounds
+        overlayLayer.position = CGPoint(x: rootLayerBounds.midX, y: rootLayerBounds.midY)
+    }
+    
+    private func addIndicator(to faceRectanglePath: CGMutablePath, for faceObservation: VNFaceObservation) {
+        let displaySize = captureDeviceResolution
+        
+        let faceBounds = VNImageRectForNormalizedRect(faceObservation.boundingBox, Int(displaySize.width), Int(displaySize.height))
+        faceRectanglePath.addRect(faceBounds)
+    }
+    
+    /// Draw paths
+    private func drawFaceObservations(_ faceObservations: [VNFaceObservation]) {
+        guard let faceRectangleShapeLayer = detectedFaceRectangleShapeLayer else {
+            return
+        }
+        
+        CATransaction.begin()
+        
+        CATransaction.setValue(NSNumber(value: true), forKey: kCATransactionDisableActions)
+        
+        let faceRectanglepath = CGMutablePath()
+        
+        for faceObservation in faceObservations {
+            addIndicator(to: faceRectanglepath, for: faceObservation)
+        }
+        
+        faceRectangleShapeLayer.path = faceRectanglepath
+        
+        updateLayerGeometry()
+        
+        CATransaction.commit()
+    }
 }
 
 extension ViewController: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        var requestHandlerOptions: [VNImageOption: AnyObject] = [:]
         
+        let cameraIntrinsicData = CMGetAttachment(sampleBuffer, key: kCMSampleBufferAttachmentKey_CameraIntrinsicMatrix, attachmentModeOut: nil)
+        if cameraIntrinsicData != nil {
+            requestHandlerOptions[VNImageOption.cameraIntrinsics] = cameraIntrinsicData
+        }
+        
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            print("Failed to obtain a CVPixelBuffer for the current output frame")
+            return
+        }
+        
+        let exifOrientation = exifOrientationForCurrentDeviceOrientation()
+        
+        guard let requests = trackingRequests, !requests.isEmpty else {
+            // No tracking object detected, so perform initial detection
+            let imageRequestHandler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer,
+                                                            orientation: exifOrientation,
+                                                            options: requestHandlerOptions)
+            
+            do {
+                guard let detectRequests = detectionRequests else {
+                    return
+                }
+                
+                try imageRequestHandler.perform(detectRequests)
+            } catch  let error as NSError {
+                NSLog("Failedto perform FaceRectangleRequest: %@", error)
+            }
+            return
+        }
+        
+        do {
+            try sequenceRequstHandler.perform(requests, on: pixelBuffer, orientation: exifOrientation)
+        } catch let error as NSError {
+            NSLog("Failed to perform SequenceRequest: %@", error)
+        }
+        
+        // Setup the next round of tracking
+        var newTrackingRequests = [VNTrackObjectRequest]()
+        for trackingRequest in requests {
+            guard let results = trackingRequest.results else {
+                return
+            }
+            
+            guard let observation = results[0] as? VNDetectedObjectObservation else {
+                return
+            }
+            
+            if !trackingRequest.isLastFrame {
+                if observation.confidence > 0.3 {
+                    trackingRequest.inputObservation = observation
+                } else {
+                    trackingRequest.isLastFrame = true
+                }
+                
+                newTrackingRequests.append(trackingRequest)
+            }
+        }
+        
+        trackingRequests = newTrackingRequests
+        
+        if newTrackingRequests.isEmpty {
+            // Nothing to track, so abort
+            return
+        }
+        
+        // Perform face landmark tracking on detected face
+        var faceLandmarkRequests = [VNDetectFaceLandmarksRequest]()
+        
+        for trackingRequest in newTrackingRequests {
+            let faceLandmarksRequest = VNDetectFaceLandmarksRequest { (request, error) in
+                if error != nil {
+                    print("FaceLandmarks error: \(String(describing: error))")
+                }
+                
+                guard let landmarksRequest = request as? VNDetectFaceLandmarksRequest,
+                      let results = landmarksRequest.results as? [VNFaceObservation] else {
+                    return
+                }
+                
+                // Perform all UI updates on the main queue, not the background queue on which this handler is being called
+                DispatchQueue.main.async {
+                    self.drawFaceObservations(results)
+                }
+            }
+            
+            guard let trackingResults = trackingRequest.results else {
+                return
+            }
+            
+            guard let observation = trackingResults[0] as? VNDetectedObjectObservation else {
+                return
+            }
+            
+            let faceObservation = VNFaceObservation(boundingBox: observation.boundingBox)
+            faceLandmarksRequest.inputFaceObservations = [faceObservation]
+            
+            // Continue to track detected facial landmarks
+            faceLandmarkRequests.append(faceLandmarksRequest)
+            
+            let imageRequestHandler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer,
+                                                            orientation: exifOrientation,
+                                                            options: requestHandlerOptions)
+            
+            do {
+                try imageRequestHandler.perform(faceLandmarkRequests)
+            } catch let error as NSError {
+                NSLog("Failed to perform FaceLandmarkRequest: %@", error)
+            }
+        }
     }
 }
 
