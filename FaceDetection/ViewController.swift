@@ -11,6 +11,7 @@ import Vision
 
 class ViewController: UIViewController {
     var previewView: UIView?
+    var faceOrientationLabel: UILabel?
     
     var session: AVCaptureSession?
     var previewLayer: AVCaptureVideoPreviewLayer?
@@ -37,11 +38,23 @@ class ViewController: UIViewController {
         
         setupPreviewView()
         
+        setupFaceOrientationLabel()
+        
         session = setupAVCaptureSession()
         
         prepareVisionRequest()
         
         session?.startRunning()
+    }
+    
+    private func setupFaceOrientationLabel() {
+        faceOrientationLabel = UILabel()
+        faceOrientationLabel?.backgroundColor = UIColor.white.withAlphaComponent(0.7)
+        faceOrientationLabel?.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(faceOrientationLabel!)
+        
+        faceOrientationLabel?.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor).isActive = true
+        faceOrientationLabel?.centerXAnchor.constraint(equalTo: view.centerXAnchor).isActive = true
     }
 
     private func setupPreviewView() {
@@ -367,6 +380,16 @@ class ViewController: UIViewController {
         
         CATransaction.commit()
     }
+    
+    private func updateFaceOrientationLabel(_ faceObservations: [VNFaceObservation]) {
+        for faceObservation in faceObservations {
+            if let roll = faceObservation.roll, let yaw = faceObservation.yaw {
+                faceOrientationLabel?.text = "roll: \(radiansForDegrees(CGFloat(roll.doubleValue))), yaw: \(radiansForDegrees(CGFloat(yaw.doubleValue)))"
+            } else {
+                faceOrientationLabel?.text = "no info"
+            }
+        }
+    }
 }
 
 extension ViewController: AVCaptureVideoDataOutputSampleBufferDelegate {
@@ -439,22 +462,23 @@ extension ViewController: AVCaptureVideoDataOutputSampleBufferDelegate {
         }
         
         // Perform face landmark tracking on detected face
-        var faceLandmarkRequests = [VNDetectFaceLandmarksRequest]()
+        var faceRectangleRequests = [VNDetectFaceRectanglesRequest]()
         
         for trackingRequest in newTrackingRequests {
-            let faceLandmarksRequest = VNDetectFaceLandmarksRequest { (request, error) in
+            let faceRectanglesRequest = VNDetectFaceRectanglesRequest { (request, error) in
                 if error != nil {
                     print("FaceLandmarks error: \(String(describing: error))")
                 }
                 
-                guard let landmarksRequest = request as? VNDetectFaceLandmarksRequest,
-                      let results = landmarksRequest.results as? [VNFaceObservation] else {
+                guard let rectanglesRequest = request as? VNDetectFaceRectanglesRequest,
+                      let results = rectanglesRequest.results as? [VNFaceObservation] else {
                     return
                 }
                 
                 // Perform all UI updates on the main queue, not the background queue on which this handler is being called
                 DispatchQueue.main.async {
                     self.drawFaceObservations(results)
+                    self.updateFaceOrientationLabel(results)
                 }
             }
             
@@ -466,18 +490,15 @@ extension ViewController: AVCaptureVideoDataOutputSampleBufferDelegate {
                 return
             }
             
-            let faceObservation = VNFaceObservation(boundingBox: observation.boundingBox)
-            faceLandmarksRequest.inputFaceObservations = [faceObservation]
-            
             // Continue to track detected facial landmarks
-            faceLandmarkRequests.append(faceLandmarksRequest)
+            faceRectangleRequests.append(faceRectanglesRequest)
             
             let imageRequestHandler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer,
                                                             orientation: exifOrientation,
                                                             options: requestHandlerOptions)
             
             do {
-                try imageRequestHandler.perform(faceLandmarkRequests)
+                try imageRequestHandler.perform(faceRectangleRequests)
             } catch let error as NSError {
                 NSLog("Failed to perform FaceLandmarkRequest: %@", error)
             }
