@@ -49,6 +49,7 @@ class ViewController: UIViewController {
     
     private func setupFaceOrientationLabel() {
         faceOrientationLabel = UILabel()
+        faceOrientationLabel?.textColor = .black
         faceOrientationLabel?.backgroundColor = UIColor.white.withAlphaComponent(0.7)
         faceOrientationLabel?.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(faceOrientationLabel!)
@@ -384,7 +385,7 @@ class ViewController: UIViewController {
     private func updateFaceOrientationLabel(_ faceObservations: [VNFaceObservation]) {
         for faceObservation in faceObservations {
             if let roll = faceObservation.roll, let yaw = faceObservation.yaw {
-                faceOrientationLabel?.text = "roll: \(radiansForDegrees(CGFloat(roll.doubleValue))), yaw: \(radiansForDegrees(CGFloat(yaw.doubleValue)))"
+                faceOrientationLabel?.text = "roll: \(roll.doubleValue * 180 / Double.pi), yaw: \(yaw.doubleValue * 180 / Double.pi)"
             } else {
                 faceOrientationLabel?.text = "no info"
             }
