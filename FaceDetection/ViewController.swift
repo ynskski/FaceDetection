@@ -466,7 +466,7 @@ extension ViewController: AVCaptureVideoDataOutputSampleBufferDelegate {
         // Perform face landmark tracking on detected face
         var faceRectangleRequests = [VNDetectFaceRectanglesRequest]()
         
-        for trackingRequest in newTrackingRequests {
+        for _ in newTrackingRequests {
             let faceRectanglesRequest = VNDetectFaceRectanglesRequest { (request, error) in
                 if error != nil {
                     print("FaceLandmarks error: \(String(describing: error))")
@@ -482,10 +482,6 @@ extension ViewController: AVCaptureVideoDataOutputSampleBufferDelegate {
                     self.drawFaceObservations(results)
                     self.updateFaceOrientationLabel(results)
                 }
-            }
-            
-            guard let trackingResults = trackingRequest.results else {
-                return
             }
             
             // Continue to track detected facial landmarks
